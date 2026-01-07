@@ -59,7 +59,10 @@ class StreamingSGD:
         losses = []
         n_test = test_A.shape[0]
         n_factor = 1.0 / (2.0 * n_test)
-        
+
+        # Ensure x is on the same device as test data
+        self.x = self.x.to(test_A.device)
+
         for _ in range(steps):
             # Measure performance on a fixed "test set" (the finite dataset A)
             # to make it comparable to the Volterra prediction for that specific A.
