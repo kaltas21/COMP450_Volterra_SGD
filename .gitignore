@@ -48,3 +48,6 @@ Thumbs.db
 # Project specific
 CLAUDE.md
 .claude/
+
+# Ignore Windows reserved file name artifact
+nul
