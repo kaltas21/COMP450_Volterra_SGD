@@ -1,7 +1,7 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 def load_mnist(
     root: str = './data',
@@ -84,3 +84,67 @@ def load_cifar10(
         y = y[:subset_size]
 
     return X, y
+
+
+def whiten_data(X: torch.Tensor, eps: float = 1e-6) -> Tuple[torch.Tensor, Dict]:
+    """
+    Whiten data so E[x] = 0 and E[xx^T] = I.
+
+    Applies the transform: x_tilde = Sigma^{-1/2} (x - mu)
+
+    Args:
+        X: Input tensor (n_samples, d_features)
+        eps: Regularization for numerical stability
+
+    Returns:
+        X_whitened: Whitened data with identity covariance
+        info: Dictionary with whitening statistics
+    """
+    n, d = X.shape
+    device = X.device
+
+    # 1. Center: subtract mean
+    mu = X.mean(dim=0, keepdim=True)
+    X_centered = X - mu
+
+    # 2. Covariance: Sigma = (1/n) * X^T X
+    Sigma = (X_centered.T @ X_centered) / n
+
+    # 3. Eigendecomposition for whitening
+    eigenvalues, eigenvectors = torch.linalg.eigh(Sigma)
+
+    # Regularize small eigenvalues for numerical stability
+    eigenvalues = torch.clamp(eigenvalues, min=eps)
+
+    # 4. Compute whitening matrix: W = V * diag(1/sqrt(eigenvalues))
+    D_inv_sqrt = torch.diag(1.0 / torch.sqrt(eigenvalues))
+    W_whiten = eigenvectors @ D_inv_sqrt
+
+    # 5. Apply whitening transform
+    X_whitened = X_centered @ W_whiten
+
+    info = {
+        'mean': mu,
+        'eigenvalues_original': eigenvalues.cpu().numpy(),
+        'whitening_matrix': W_whiten,
+        'condition_number': (eigenvalues.max() / eigenvalues.min()).item()
+    }
+
+    return X_whitened, info
+
+
+def labels_to_onehot(y: torch.Tensor, num_classes: int = 10) -> torch.Tensor:
+    """
+    Convert integer labels to one-hot encoded matrix.
+
+    Args:
+        y: Label tensor (n_samples,) with values in [0, num_classes-1]
+        num_classes: Number of classes (default 10 for MNIST)
+
+    Returns:
+        Y: One-hot matrix (n_samples, num_classes)
+    """
+    n = y.shape[0]
+    Y = torch.zeros(n, num_classes, dtype=torch.float32, device=y.device)
+    Y[torch.arange(n, device=y.device), y] = 1.0
+    return Y

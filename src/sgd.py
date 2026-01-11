@@ -76,5 +76,62 @@ class StreamingSGD:
             
             grad = a_stream.T @ (a_stream @ self.x - b_stream) / self.batch_size
             self.x -= self.lr * grad
-            
+
         return np.array(losses)
+
+
+class MultiOutputLeastSquaresSGD:
+    """
+    SGD for multi-output least squares: min (1/2n) ||AX - B||_F^2
+
+    Solves k independent regression problems sharing the same feature matrix A.
+    Used for classification as regression with one-hot encoded targets.
+    """
+
+    def __init__(self, A: torch.Tensor, B: torch.Tensor, learning_rate: float, batch_size: int = 1):
+        """
+        Args:
+            A: Feature matrix (n, d)
+            B: Target matrix (n, k) where k = number of outputs (e.g., 10 for MNIST)
+            learning_rate: Step size (gamma / n in normalized form)
+            batch_size: Mini-batch size
+        """
+        self.A = A
+        self.B = B
+        self.lr = learning_rate
+        self.batch_size = batch_size
+        self.n, self.d = A.shape
+        self.k = B.shape[1]
+        self.X = torch.zeros(self.d, self.k, dtype=A.dtype, device=A.device)
+
+    def train(self, steps: int) -> np.ndarray:
+        """
+        Run SGD for specified number of steps.
+
+        Returns:
+            losses: Array of Frobenius norm losses at each step
+        """
+        losses = []
+        n_factor = 1.0 / (2.0 * self.n)
+
+        for _ in range(steps):
+            # Full loss: (1/2n) * ||AX - B||_F^2
+            with torch.no_grad():
+                residuals = self.A @ self.X - self.B
+                loss = n_factor * torch.sum(residuals**2)
+                losses.append(loss.item())
+
+            # SGD update with mini-batch
+            indices = torch.randint(0, self.n, (self.batch_size,), device=self.A.device)
+            a_batch = self.A[indices]  # (batch_size, d)
+            b_batch = self.B[indices]  # (batch_size, k)
+
+            grad = a_batch.T @ (a_batch @ self.X - b_batch) / self.batch_size  # (d, k)
+            self.X -= self.lr * grad
+
+        return np.array(losses)
+
+    @property
+    def solution(self) -> torch.Tensor:
+        """Return current solution matrix X."""
+        return self.X
