@@ -30,7 +30,8 @@ env/
 .ipynb_checkpoints/
 
 # Data (too large for git)
-data/
+data/*
+!data/MNIST/
 
 # PDF documents
 docs/*.pdf
