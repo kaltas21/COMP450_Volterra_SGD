@@ -1,7 +1,14 @@
 import torch
 import math
+from typing import Optional
 
-def generate_random_weights(d_in: int, d_out: int, distribution: str = 'gaussian') -> torch.Tensor:
+
+def generate_random_weights(
+    d_in: int,
+    d_out: int,
+    distribution: str = 'gaussian',
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
     """
     Generates a fixed random weight matrix W for feature projection.
 
@@ -9,12 +16,13 @@ def generate_random_weights(d_in: int, d_out: int, distribution: str = 'gaussian
         d_in (int): Input dimension (raw features).
         d_out (int): Output dimension (random features).
         distribution (str): 'gaussian' or 'orthogonal'.
+        device (torch.device, optional): Device for tensor. If None, uses default.
 
     Returns:
         W (torch.Tensor): Weight matrix of shape (d_in, d_out).
     """
     if distribution == 'gaussian':
-        W = torch.randn(d_in, d_out)
+        W = torch.randn(d_in, d_out, device=device)
     else:
         raise NotImplementedError(f"Distribution {distribution} not implemented.")
     return W
@@ -67,7 +75,11 @@ def compute_features(
 
     return A
 
-def generate_isotropic_matrix(n: int, d: int) -> torch.Tensor:
+def generate_isotropic_matrix(
+    n: int,
+    d: int,
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
     """
     Generates a purely synthetic Gaussian matrix A for baseline verification.
     Entries are i.i.d N(0, 1).
@@ -75,8 +87,9 @@ def generate_isotropic_matrix(n: int, d: int) -> torch.Tensor:
     Args:
         n (int): Number of samples.
         d (int): Number of features.
+        device (torch.device, optional): Device for tensor. If None, uses default.
 
     Returns:
         A (torch.Tensor): Matrix of shape (n, d).
     """
-    return torch.randn(n, d)
+    return torch.randn(n, d, device=device)

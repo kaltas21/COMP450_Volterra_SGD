@@ -48,20 +48,23 @@ class StreamingSGD:
     Simulates SGD on an infinite stream of data (One-pass).
     At each step, we generate batch_size new samples (a_i, b_i).
     """
-    def __init__(self, d: int, learning_rate: float, data_gen_func, batch_size: int = 1):
+    def __init__(self, d: int, learning_rate: float, data_gen_func, batch_size: int = 1, device: torch.device = None):
         self.d = d
         self.lr = learning_rate
-        self.gen_func = data_gen_func # Function that returns (A_batch, b_batch)
+        self.gen_func = data_gen_func  # Function that returns (A_batch, b_batch)
         self.batch_size = batch_size
-        self.x = torch.zeros(d)
-        
+        self.device = device
+        # Defer x creation until we know the device
+        self.x = None
+
     def train(self, steps: int, test_A: torch.Tensor, test_b: torch.Tensor) -> np.ndarray:
         losses = []
         n_test = test_A.shape[0]
         n_factor = 1.0 / (2.0 * n_test)
 
-        # Ensure x is on the same device as test data
-        self.x = self.x.to(test_A.device)
+        # Initialize x on the correct device (lazy initialization)
+        if self.x is None or self.x.device != test_A.device:
+            self.x = torch.zeros(self.d, dtype=test_A.dtype, device=test_A.device)
 
         for _ in range(steps):
             # Measure performance on a fixed "test set" (the finite dataset A)
