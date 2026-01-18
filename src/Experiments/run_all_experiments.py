@@ -49,6 +49,10 @@ NUM_EPOCHS = 20
 NUM_RUNS = 5
 ASPECT_RATIOS = [0.5, 1.0, 1.5]
 
+# GPU optimization: compute loss every N steps (1=every step, higher=faster)
+# Set to 1 for exact paper reproduction, or higher (e.g., 30) for faster runs
+LOSS_EVERY = 1
+
 # Output directories
 RESULTS_DIR = './results'
 PLOTS_DIR = './plots'
@@ -175,8 +179,12 @@ def analyze_and_scale_spectrum(A: torch.Tensor, r: float, n: int):
 def run_sgd_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
                   gamma_max: float, r: float, n: int, num_epochs: int,
                   num_runs: int, R_val: float, noise_var: float,
-                  sweep_name: str = ""):
-    """Run SGD + Volterra comparison for multiple learning rates."""
+                  sweep_name: str = "", loss_every: int = 1):
+    """Run SGD + Volterra comparison for multiple learning rates.
+
+    Args:
+        loss_every: Compute loss every N steps (GPU optimization)
+    """
     steps = n * num_epochs
     multipliers = [0.25, 0.5, 0.9]
 
@@ -190,16 +198,18 @@ def run_sgd_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
         solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=noise_var)
         psi, t_theory = solver.solve(t_max=num_epochs, dt=0.05)
 
-        # Empirical SGD with progress bar
+        # Empirical SGD with progress bar (GPU-optimized)
         sgd_runs = []
         for run in tqdm(range(num_runs), desc=f"  {sweep_name} gamma={mult:.0%}", leave=False):
             model = LeastSquaresSGD(A, b, learning_rate=gamma/n, batch_size=1)
-            loss_hist = model.train(steps, show_progress=True, desc=f"    Run {run+1}")
+            loss_hist = model.train(steps, show_progress=True, desc=f"    Run {run+1}",
+                                    loss_every=loss_every)
             sgd_runs.append(loss_hist)
 
         sgd_mean = np.mean(sgd_runs, axis=0)
         sgd_std = np.std(sgd_runs, axis=0)
 
+        # Store loss_every for correct time axis in plots
         results[key] = {
             'gamma': gamma,
             'mult': mult,
@@ -207,7 +217,8 @@ def run_sgd_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
             'psi': psi,
             'sgd_runs': sgd_runs,
             'sgd_mean': sgd_mean,
-            'sgd_std': sgd_std
+            'sgd_std': sgd_std,
+            'loss_every': loss_every
         }
 
     return results
@@ -236,7 +247,9 @@ def plot_loss_curves(all_results: dict, n_samples: int, output_dir: str,
         res = all_results[r]
 
         for i, (key, data) in enumerate(res['results_safe'].items()):
-            t_sgd = np.arange(len(data['sgd_mean'])) / n_samples
+            # Account for loss_every in time axis
+            loss_every = data.get('loss_every', 1)
+            t_sgd = np.arange(len(data['sgd_mean'])) * loss_every / n_samples
             ax.plot(t_sgd, data['sgd_mean'], color=colors_lr[i], lw=2, alpha=0.9)
             ax.fill_between(t_sgd,
                            data['sgd_mean'] - data['sgd_std'],
@@ -284,7 +297,9 @@ def plot_correlation_scatter(all_results: dict, n_samples: int, output_dir: str,
         all_sgd = []
 
         for key, data in res['results_safe'].items():
-            t_sgd = np.arange(len(data['sgd_mean'])) / n_samples
+            # Account for loss_every in time axis
+            loss_every = data.get('loss_every', 1)
+            t_sgd = np.arange(len(data['sgd_mean'])) * loss_every / n_samples
             volterra_interp = np.interp(t_sgd, data['t_theory'], data['psi'])
             step = max(1, len(t_sgd) // 100)
             all_volterra.extend(volterra_interp[::step])
@@ -528,7 +543,7 @@ def run_part2_base(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: torch.d
         results_safe = run_sgd_sweep(
             A_scaled, b_labels, eigvals,
             gamma_max_safe, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
-            R_val, noise_var, sweep_name="Safe"
+            R_val, noise_var, sweep_name="Safe", loss_every=LOSS_EVERY
         )
 
         all_results[r] = {
@@ -589,7 +604,7 @@ def run_part2_nonlinear(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: to
         results_safe = run_sgd_sweep(
             A_scaled, b_labels, eigvals,
             gamma_max_safe, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
-            R_val, noise_var, sweep_name="Safe"
+            R_val, noise_var, sweep_name="Safe", loss_every=LOSS_EVERY
         )
 
         all_results[r] = {
@@ -655,7 +670,7 @@ def run_part2_whitened(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: tor
         results_safe = run_sgd_sweep(
             A_scaled, b_labels, eigvals,
             gamma_max_safe, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
-            R_val, noise_var, sweep_name="Safe"
+            R_val, noise_var, sweep_name="Safe", loss_every=LOSS_EVERY
         )
 
         all_results[r] = {
@@ -741,7 +756,9 @@ def run_part3_criticality(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: 
 
             for run in tqdm(range(NUM_RUNS), desc=f"    mult={mult:.3f}", leave=False):
                 model = LeastSquaresSGD(A_scaled, b_labels, learning_rate=lr, batch_size=1)
-                loss_hist = model.train(steps, show_progress=True, desc=f"      Run {run+1}")
+                # For criticality, we only need final loss, so sample even less frequently
+                loss_hist = model.train(steps, show_progress=True, desc=f"      Run {run+1}",
+                                        loss_every=LOSS_EVERY)
 
                 stable = is_stable(loss_hist, initial_loss)
                 final_loss = loss_hist[-1] if np.isfinite(loss_hist[-1]) else float('inf')

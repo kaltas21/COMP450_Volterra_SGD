@@ -7,6 +7,11 @@ class LeastSquaresSGD:
     """
     Implements Stochastic Gradient Descent for the Least Squares problem.
 
+    GPU-optimized version:
+    - Losses stored on GPU, transferred in bulk at end
+    - Configurable loss sampling frequency
+    - Minimized CPU-GPU synchronization
+
     Problem: min_x (1/2n) * sum_i (a_i^T x - b_i)^2
     """
 
@@ -18,39 +23,59 @@ class LeastSquaresSGD:
         self.n, self.d = A.shape
         self.x = torch.zeros(self.d, dtype=A.dtype, device=A.device)
 
-    def train(self, steps: int, show_progress: bool = False, desc: str = "SGD") -> np.ndarray:
-        losses = []
+    def train(self, steps: int, show_progress: bool = False, desc: str = "SGD",
+              loss_every: int = 1) -> np.ndarray:
+        """
+        Run SGD for specified number of steps.
+
+        Args:
+            steps: Number of SGD steps
+            show_progress: Whether to show tqdm progress bar
+            desc: Description for progress bar
+            loss_every: Compute loss every N steps (1 = every step, higher = faster but coarser)
+
+        Returns:
+            losses: Array of loss values
+        """
         n_factor = 1.0 / (2.0 * self.n)
 
-        # Precompute XT X if small enough for faster loss calc, else do batch
-        # For exact paper reproduction, we calculate full loss at each step
+        # Pre-allocate loss tensor on GPU to avoid CPU-GPU sync per step
+        n_losses = (steps + loss_every - 1) // loss_every
+        losses_gpu = torch.zeros(n_losses, dtype=self.A.dtype, device=self.A.device)
+
+        # Pre-generate all random indices at once (much faster than per-step)
+        all_indices = torch.randint(0, self.n, (steps, self.batch_size), device=self.A.device)
 
         iterator = range(steps)
         if show_progress:
-            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//20 or 1)
 
-        for _ in iterator:
-            # 1. Full Loss (Expensive but required for trajectory plotting)
-            # f(x) = 1/(2n) ||Ax - b||^2
-            with torch.no_grad():
-                residuals = self.A @ self.x - self.b
-                loss = n_factor * torch.sum(residuals**2)
-                losses.append(loss.item())
+        loss_idx = 0
+        for step in iterator:
+            # Compute loss only every loss_every steps
+            if step % loss_every == 0:
+                with torch.no_grad():
+                    residuals = self.A @ self.x - self.b
+                    losses_gpu[loss_idx] = n_factor * torch.sum(residuals**2)
+                    loss_idx += 1
 
-            # 2. Update
-            indices = torch.randint(0, self.n, (self.batch_size,), device=self.A.device)
+            # SGD Update - use pre-generated indices
+            indices = all_indices[step]
             a_batch = self.A[indices]
             b_batch = self.b[indices]
 
             grad = a_batch.T @ (a_batch @ self.x - b_batch) / self.batch_size
             self.x -= self.lr * grad
 
-        return np.array(losses)
+        # Single GPU->CPU transfer at the end
+        return losses_gpu[:loss_idx].cpu().numpy()
 
 class StreamingSGD:
     """
     Simulates SGD on an infinite stream of data (One-pass).
     At each step, we generate batch_size new samples (a_i, b_i).
+
+    GPU-optimized version with bulk loss transfer.
     """
     def __init__(self, d: int, learning_rate: float, data_gen_func, batch_size: int = 1, device: torch.device = None):
         self.d = d
@@ -62,8 +87,8 @@ class StreamingSGD:
         self.x = None
 
     def train(self, steps: int, test_A: torch.Tensor, test_b: torch.Tensor,
-              show_progress: bool = False, desc: str = "Streaming") -> np.ndarray:
-        losses = []
+              show_progress: bool = False, desc: str = "Streaming",
+              loss_every: int = 1) -> np.ndarray:
         n_test = test_A.shape[0]
         n_factor = 1.0 / (2.0 * n_test)
 
@@ -71,17 +96,22 @@ class StreamingSGD:
         if self.x is None or self.x.device != test_A.device:
             self.x = torch.zeros(self.d, dtype=test_A.dtype, device=test_A.device)
 
+        # Pre-allocate loss tensor on GPU
+        n_losses = (steps + loss_every - 1) // loss_every
+        losses_gpu = torch.zeros(n_losses, dtype=test_A.dtype, device=test_A.device)
+
         iterator = range(steps)
         if show_progress:
-            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//20 or 1)
 
-        for _ in iterator:
+        loss_idx = 0
+        for step in iterator:
             # Measure performance on a fixed "test set" (the finite dataset A)
-            # to make it comparable to the Volterra prediction for that specific A.
-            with torch.no_grad():
-                residuals = test_A @ self.x - test_b
-                loss = n_factor * torch.sum(residuals**2)
-            losses.append(loss.item())
+            if step % loss_every == 0:
+                with torch.no_grad():
+                    residuals = test_A @ self.x - test_b
+                    losses_gpu[loss_idx] = n_factor * torch.sum(residuals**2)
+                    loss_idx += 1
 
             # Generate fresh data for update
             a_stream, b_stream = self.gen_func(self.batch_size)
@@ -93,13 +123,15 @@ class StreamingSGD:
             grad = a_stream.T @ (a_stream @ self.x - b_stream) / self.batch_size
             self.x -= self.lr * grad
 
-        return np.array(losses)
+        # Single GPU->CPU transfer at the end
+        return losses_gpu[:loss_idx].cpu().numpy()
 
 
 class MultiOutputLeastSquaresSGD:
     """
     SGD for multi-output least squares: min (1/2n) ||AX - B||_F^2
 
+    GPU-optimized version with bulk loss transfer.
     Solves k independent regression problems sharing the same feature matrix A.
     Used for classification as regression with one-hot encoded targets.
     """
@@ -120,36 +152,52 @@ class MultiOutputLeastSquaresSGD:
         self.k = B.shape[1]
         self.X = torch.zeros(self.d, self.k, dtype=A.dtype, device=A.device)
 
-    def train(self, steps: int, show_progress: bool = False, desc: str = "MultiSGD") -> np.ndarray:
+    def train(self, steps: int, show_progress: bool = False, desc: str = "MultiSGD",
+              loss_every: int = 1) -> np.ndarray:
         """
         Run SGD for specified number of steps.
 
+        Args:
+            steps: Number of SGD steps
+            show_progress: Whether to show tqdm progress bar
+            desc: Description for progress bar
+            loss_every: Compute loss every N steps
+
         Returns:
-            losses: Array of Frobenius norm losses at each step
+            losses: Array of Frobenius norm losses
         """
-        losses = []
         n_factor = 1.0 / (2.0 * self.n)
+
+        # Pre-allocate loss tensor on GPU
+        n_losses = (steps + loss_every - 1) // loss_every
+        losses_gpu = torch.zeros(n_losses, dtype=self.A.dtype, device=self.A.device)
+
+        # Pre-generate all random indices at once
+        all_indices = torch.randint(0, self.n, (steps, self.batch_size), device=self.A.device)
 
         iterator = range(steps)
         if show_progress:
-            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//20 or 1)
 
-        for _ in iterator:
+        loss_idx = 0
+        for step in iterator:
             # Full loss: (1/2n) * ||AX - B||_F^2
-            with torch.no_grad():
-                residuals = self.A @ self.X - self.B
-                loss = n_factor * torch.sum(residuals**2)
-                losses.append(loss.item())
+            if step % loss_every == 0:
+                with torch.no_grad():
+                    residuals = self.A @ self.X - self.B
+                    losses_gpu[loss_idx] = n_factor * torch.sum(residuals**2)
+                    loss_idx += 1
 
             # SGD update with mini-batch
-            indices = torch.randint(0, self.n, (self.batch_size,), device=self.A.device)
+            indices = all_indices[step]
             a_batch = self.A[indices]  # (batch_size, d)
             b_batch = self.B[indices]  # (batch_size, k)
 
             grad = a_batch.T @ (a_batch @ self.X - b_batch) / self.batch_size  # (d, k)
             self.X -= self.lr * grad
 
-        return np.array(losses)
+        # Single GPU->CPU transfer at the end
+        return losses_gpu[:loss_idx].cpu().numpy()
 
     @property
     def solution(self) -> torch.Tensor:
