@@ -354,6 +354,76 @@ def plot_correlation_scatter(all_results: dict, n_samples: int, output_dir: str,
     return correlations
 
 
+def compute_error_metrics(all_results: dict, n_samples: int) -> tuple:
+    """
+    Compute per-aspect-ratio MSE and relative error between Volterra and SGD.
+    """
+    mse_by_r = []
+    rel_by_r = []
+
+    for r in ASPECT_RATIOS:
+        res = all_results[r]
+        mse_vals = []
+        rel_vals = []
+
+        for data in res['results_safe'].values():
+            loss_every = data.get('loss_every', 1)
+            t_sgd = np.arange(len(data['sgd_mean'])) * loss_every / n_samples
+            volterra_interp = np.interp(t_sgd, data['t_theory'], data['psi'])
+            sgd = np.asarray(data['sgd_mean'])
+
+            valid = np.isfinite(volterra_interp) & np.isfinite(sgd)
+            volterra_interp = volterra_interp[valid]
+            sgd = sgd[valid]
+            if sgd.size == 0:
+                continue
+
+            mse_vals.append(np.mean((volterra_interp - sgd) ** 2))
+            denom = np.mean(np.abs(sgd))
+            rel_vals.append(np.mean(np.abs(volterra_interp - sgd)) / (denom + 1e-12))
+
+        mse_by_r.append(np.mean(mse_vals) if mse_vals else float('nan'))
+        rel_by_r.append(np.mean(rel_vals) if rel_vals else float('nan'))
+
+    return np.array(mse_by_r), np.array(rel_by_r)
+
+
+def plot_error_metrics(all_results: dict, n_samples: int, output_dir: str,
+                       title_prefix: str = ""):
+    """Generate MSE and relative error plots."""
+    mse_by_r, rel_by_r = compute_error_metrics(all_results, n_samples)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    colors_r = [COLORS['lr1'], COLORS['lr2'], COLORS['lr3']]
+    x = np.arange(len(ASPECT_RATIOS))
+
+    ax = axes[0]
+    ax.bar(x, mse_by_r, color=colors_r, edgecolor='black', lw=0.8)
+    ax.set_xlabel('Aspect Ratio r')
+    ax.set_ylabel('MSE (log scale)')
+    ax.set_title('MSE')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
+    ax.set_yscale('log')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    ax = axes[1]
+    ax.bar(x, rel_by_r, color=colors_r, edgecolor='black', lw=0.8)
+    ax.set_xlabel('Aspect Ratio r')
+    ax.set_ylabel('Relative Error')
+    ax.set_title('Relative Error')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle(f'{title_prefix} Error Metrics', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'error_metrics.png'), dpi=300)
+    plt.savefig(os.path.join(output_dir, 'error_metrics.pdf'))
+    plt.close()
+
+
 def plot_eigenvalue_spectrum(all_eigvals: dict, output_dir: str, title_prefix: str = ""):
     """Generate eigenvalue spectrum figure."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -582,6 +652,7 @@ def run_part2_base(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: torch.d
     correlations = plot_correlation_scatter(all_results, N_SAMPLES, plots_dir, "Part 2 Base:")
     plot_eigenvalue_spectrum(all_eigvals, plots_dir, "Part 2 Base:")
     plot_summary_metrics(all_results, plots_dir, "Part 2 Base:")
+    plot_error_metrics(all_results, N_SAMPLES, plots_dir, "Part 2 Base:")
 
     print(f"  Plots saved to {plots_dir}/")
     print(f"  Correlations: {[f'{c:.4f}' for c in correlations]}")
@@ -644,6 +715,7 @@ def run_part2_nonlinear(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: to
     correlations = plot_correlation_scatter(all_results, N_SAMPLES, plots_dir, "Part 2 Nonlinear:")
     plot_eigenvalue_spectrum(all_eigvals, plots_dir, "Part 2 Nonlinear:")
     plot_summary_metrics(all_results, plots_dir, "Part 2 Nonlinear:")
+    plot_error_metrics(all_results, N_SAMPLES, plots_dir, "Part 2 Nonlinear:")
 
     print(f"  Plots saved to {plots_dir}/")
     print(f"  Correlations: {[f'{c:.4f}' for c in correlations]}")
@@ -710,6 +782,7 @@ def run_part2_whitened(X_mnist: torch.Tensor, y_mnist: torch.Tensor, device: tor
     correlations = plot_correlation_scatter(all_results, N_SAMPLES, plots_dir, "Part 2 Whitened:")
     plot_eigenvalue_spectrum(all_eigvals, plots_dir, "Part 2 Whitened:")
     plot_summary_metrics(all_results, plots_dir, "Part 2 Whitened:")
+    plot_error_metrics(all_results, N_SAMPLES, plots_dir, "Part 2 Whitened:")
 
     print(f"  Plots saved to {plots_dir}/")
     print(f"  Correlations: {[f'{c:.4f}' for c in correlations]}")

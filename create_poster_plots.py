@@ -75,7 +75,8 @@ COLORS = {
     'sde': '#ff7f0e',         # Orange
 }
 
-output_dir = './poster_figures'
+output_dir = './' \
+'_figures'
 os.makedirs(output_dir, exist_ok=True)
 
 print("="*70)
