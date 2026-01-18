@@ -72,11 +72,15 @@ class StreamingSGD:
             with torch.no_grad():
                 residuals = test_A @ self.x - test_b
                 loss = n_factor * torch.sum(residuals**2)
-                losses.append(loss.item())
+            losses.append(loss.item())
             
             # Generate fresh data for update
             a_stream, b_stream = self.gen_func(self.batch_size)
-            
+
+            # Keep streaming samples on the same device/dtype as the model parameters
+            a_stream = a_stream.to(device=test_A.device, dtype=test_A.dtype)
+            b_stream = b_stream.to(device=test_A.device, dtype=test_A.dtype)
+
             grad = a_stream.T @ (a_stream @ self.x - b_stream) / self.batch_size
             self.x -= self.lr * grad
 

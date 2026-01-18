@@ -1,8 +1,13 @@
 """
-Part 2: Non-Linear Target Experiment (ReLU on targets)
+Part 2: Non-Linear Target Experiment (ReLU on labels)
 
-Key difference: b = ReLU(A @ x_star) instead of b = A @ x_star
-This creates a non-realizable problem (no exact solution exists).
+Key difference: b is built directly from MNIST labels instead of a planted
+target. We center the digit labels and apply ReLU:
+
+    b = ReLU(y - mean(y))
+
+This keeps the non-realizable, half-zero structure from the original setup
+while ensuring the regression task still uses the real MNIST targets.
 
 Parameters: n=3000, epochs=20, runs=5, aspect_ratios=[0.5, 1.0, 1.5]
 """
@@ -63,27 +68,35 @@ def build_random_features(X: torch.Tensor, r: float, device: torch.device):
     return A, W
 
 
-def generate_nonlinear_planted_targets(A: torch.Tensor, device: torch.device):
+def prepare_nonlinear_label_targets(y: torch.Tensor, device: torch.device):
     """
-    Generate NON-LINEAR planted targets: b = ReLU(A @ x_star)
-    This creates a non-realizable problem.
+    Build non-linear regression targets from MNIST digits.
+
+    We center the labels and apply ReLU so roughly half of the entries are
+    clamped to zero, mirroring the non-realizable ReLU target from the
+    original design while still using real labels.
     """
-    n, d = A.shape
-    x_star = torch.randn(d, device=device)
-    x_star = x_star / torch.norm(x_star)
-
-    linear_target = A @ x_star
-    b = torch.nn.functional.relu(linear_target)
-
+    centered = y.to(device=device, dtype=torch.float32)
+    centered = centered - centered.mean()
+    b = torch.nn.functional.relu(centered)
     zero_fraction = (b == 0).float().mean().item()
 
-    x0 = torch.zeros(d, device=device)
-    initial_loss = (1.0 / (2 * n)) * torch.sum(b**2).item()
-
     print(f"  Zero fraction (ReLU clipped): {zero_fraction:.2%}")
-    print(f"  Initial loss f(x0) = {initial_loss:.4f}")
 
-    return x_star, b, x0, initial_loss, zero_fraction
+    return b, zero_fraction
+
+
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
+    """
+    Estimate R and noise variance for Volterra using the best least-squares fit
+    to the label-derived targets on the current feature matrix.
+    """
+    with torch.no_grad():
+        solution = torch.linalg.lstsq(A, b.unsqueeze(1)).solution.squeeze(1)
+        residuals = A @ solution - b
+        R_val = torch.sum(solution**2).item()
+        noise_var = torch.mean(residuals**2).item()
+    return R_val, noise_var
 
 
 def analyze_and_scale_spectrum(A: torch.Tensor, r: float, n: int):
@@ -121,7 +134,8 @@ def analyze_and_scale_spectrum(A: torch.Tensor, r: float, n: int):
 
 def run_experiment_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
                          gamma_max: float, r: float, n: int, num_epochs: int,
-                         num_runs: int, sweep_name: str = ""):
+                         num_runs: int, R_val: float, noise_var: float,
+                         sweep_name: str = ""):
     """Run SGD + Volterra comparison for multiple learning rates."""
     steps = n * num_epochs
     multipliers = [0.25, 0.5, 0.9]
@@ -135,9 +149,8 @@ def run_experiment_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
         key = f"{mult:.2f}"
         print(f"  gamma = {gamma:.4f} ({mult*100:.0f}% of gamma_max)...")
 
-        # Volterra Theory (R=1 as approximation for non-realizable case)
-        R_val = 1.0
-        solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=0.0)
+        # Volterra Theory with label-derived forcing parameters
+        solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=noise_var)
         psi, t_theory = solver.solve(t_max=num_epochs, dt=0.05)
 
         # Empirical SGD
@@ -328,7 +341,7 @@ def main():
 
     print(f"\n{'='*60}")
     print("PART 2: NON-LINEAR TARGET EXPERIMENT")
-    print("Key change: b = ReLU(A @ x_star)")
+    print("Key change: b = ReLU(y - mean(y)) using real labels")
     print(f"{'='*60}")
     print(f"Parameters: n={N_SAMPLES}, epochs={NUM_EPOCHS}, runs={NUM_RUNS}")
     print(f"Aspect ratios: {ASPECT_RATIOS}")
@@ -337,10 +350,13 @@ def main():
 
     # Load MNIST
     print("\nLoading MNIST...")
-    X_mnist, _ = load_mnist(root='./data', train=True, flatten=True,
+    X_mnist, y_mnist = load_mnist(root='./data', train=True, flatten=True,
                             subset_size=N_SAMPLES, download=True)
     X_mnist = X_mnist.to(device)
+    y_mnist = y_mnist.to(device)
+    b_labels, zero_fraction_base = prepare_nonlinear_label_targets(y_mnist, device)
     print(f"X_mnist shape: {X_mnist.shape}")
+    print(f"Labels shape: {y_mnist.shape} (centered then ReLUed)")
 
     # Main experiment loop
     print("\n" + "="*60)
@@ -364,18 +380,20 @@ def main():
 
         all_eigvals[r] = eigvals
 
-        x_star, b_scaled, x0, initial_loss, zero_fraction = \
-            generate_nonlinear_planted_targets(A_scaled, device)
+        initial_loss = (1.0 / (2 * N_SAMPLES)) * torch.sum(b_labels**2).item()
+        R_val, noise_var = estimate_target_stats(A_scaled, b_labels)
 
         results_safe = run_experiment_sweep(
-            A_scaled, b_scaled, eigvals,
+            A_scaled, b_labels, eigvals,
             gamma_max_safe, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
+            R_val, noise_var,
             sweep_name="Safe"
         )
 
         results_theory = run_experiment_sweep(
-            A_scaled, b_scaled, eigvals,
+            A_scaled, b_labels, eigvals,
             gamma_max_theory, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
+            R_val, noise_var,
             sweep_name="Theory"
         )
 
@@ -384,7 +402,9 @@ def main():
             'gamma_max_theory': gamma_max_theory,
             'gamma_max_safe': gamma_max_safe,
             'initial_loss': initial_loss,
-            'zero_fraction': zero_fraction,
+            'zero_fraction': zero_fraction_base,
+            'label_R': R_val,
+            'label_noise': noise_var,
             'eigvals': eigvals,
             'results_safe': results_safe,
             'results_theory': results_theory

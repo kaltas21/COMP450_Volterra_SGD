@@ -5,6 +5,9 @@ Empirically maps when SGD becomes unstable as learning rate increases.
 Tests the gap between theoretical critical step size (gamma_theory)
 and the safe step size (gamma_safe = 2/lambda_max).
 
+Targets are the mean-centered MNIST digit labels (no planted x*), to keep the
+criticality analysis tied to the actual dataset.
+
 Parameters: n=3000, epochs=20, runs=5, aspect_ratios=[0.5, 1.0, 1.5]
 """
 
@@ -45,6 +48,14 @@ def get_device():
     return device
 
 
+def prepare_label_targets(y: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """
+    Use MNIST digit labels as regression targets (mean-centered).
+    """
+    b = y.to(device=device, dtype=torch.float32)
+    return b - b.mean()
+
+
 def is_stable(loss_hist: np.ndarray, initial_loss: float) -> bool:
     """
     Stability criteria:
@@ -58,7 +69,7 @@ def is_stable(loss_hist: np.ndarray, initial_loss: float) -> bool:
     return True
 
 
-def run_criticality_experiment(X: torch.Tensor, r: float, n: int,
+def run_criticality_experiment(X: torch.Tensor, y: torch.Tensor, r: float, n: int,
                                num_epochs: int, num_runs: int, device: torch.device):
     """Run step-size criticality analysis for a specific aspect ratio."""
     d = int(n * r)
@@ -69,10 +80,8 @@ def run_criticality_experiment(X: torch.Tensor, r: float, n: int,
     A = compute_features(X, W, activation='shifted_relu', scale_by_sqrt_d=True)
     A = A - A.mean(dim=0, keepdim=True)
 
-    # Planted Target
-    x_star = torch.randn(d, device=device)
-    x_star = x_star / torch.norm(x_star)
-    b = A @ x_star
+    # Label-based target (mean-centered digits)
+    b = prepare_label_targets(y, device)
 
     # Eigenvalue Analysis
     print("Computing eigenvalues...")
@@ -83,7 +92,6 @@ def run_criticality_experiment(X: torch.Tensor, r: float, n: int,
     # Scale A so mean(lambda) = 1
     scale_factor = 1.0 / np.sqrt(mean_eig)
     A_scaled = A * scale_factor
-    b_scaled = A_scaled @ x_star
 
     # Recompute spectral properties after scaling
     eigvals_scaled = compute_eigenvalues(A_scaled)
@@ -98,7 +106,7 @@ def run_criticality_experiment(X: torch.Tensor, r: float, n: int,
     print(f"  gamma_safe = {gamma_safe:.4f}")
     print(f"  gamma_theory = {gamma_theory:.4f}")
 
-    initial_loss = (1.0 / (2 * n)) * torch.sum(b_scaled**2).item()
+    initial_loss = (1.0 / (2 * n)) * torch.sum(b**2).item()
     print(f"  Initial Loss: {initial_loss:.4f}")
 
     # Learning Rate Sweep: gamma = gamma_safe * 2^k
@@ -119,7 +127,7 @@ def run_criticality_experiment(X: torch.Tensor, r: float, n: int,
         steps = n * num_epochs
 
         for run in range(num_runs):
-            model = LeastSquaresSGD(A_scaled, b_scaled, learning_rate=lr, batch_size=1)
+            model = LeastSquaresSGD(A_scaled, b, learning_rate=lr, batch_size=1)
             loss_hist = model.train(steps)
 
             stable = is_stable(loss_hist, initial_loss)
@@ -381,9 +389,10 @@ def main():
 
     # Load MNIST
     print("\nLoading MNIST...")
-    X_mnist, _ = load_mnist(root='./data', train=True, flatten=True,
+    X_mnist, y_mnist = load_mnist(root='./data', train=True, flatten=True,
                             subset_size=N_SAMPLES, download=True)
     X_mnist = X_mnist.to(device)
+    y_mnist = y_mnist.to(device)
     print(f"X_mnist shape: {X_mnist.shape}")
 
     # Main experiment loop
@@ -392,7 +401,7 @@ def main():
 
     for r in ASPECT_RATIOS:
         all_results[r] = run_criticality_experiment(
-            X_mnist, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS, device
+            X_mnist, y_mnist, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS, device
         )
 
     total_time = time.time() - start_time

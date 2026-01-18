@@ -2,7 +2,7 @@
 Part 2: Base Experiment - Volterra Theory on MNIST Random Features
 
 Tests Volterra theory predictions against empirical SGD on random features
-derived from MNIST data with planted (linear) targets.
+derived from MNIST data when regressing directly on the digit labels (centered).
 
 Parameters: n=3000, epochs=20, runs=5, aspect_ratios=[0.5, 1.0, 1.5]
 """
@@ -63,15 +63,33 @@ def build_random_features(X: torch.Tensor, r: float, device: torch.device):
     return A, W
 
 
-def generate_planted_targets(A: torch.Tensor, device: torch.device):
-    """Generate planted targets b = A @ x* with ||x*|| = 1."""
-    n, d = A.shape
-    x_star = torch.randn(d, device=device)
-    x_star = x_star / torch.norm(x_star)
-    b = A @ x_star
-    x0 = torch.zeros(d, device=device)
-    initial_loss = (1.0 / (2 * n)) * torch.sum(b**2).item()
-    return x_star, b, x0, initial_loss
+def prepare_label_targets(y: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """
+    Use MNIST digit labels as regression targets.
+
+    Labels are centered to remove the intercept term, which keeps the loss scale
+    comparable to the planted-target setup and makes the Volterra forcing term
+    depend on the feature covariance instead of a constant offset.
+    """
+    b = y.to(device=device, dtype=torch.float32)
+    return b - b.mean()
+
+
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
+    """
+    Estimate R and noise variance for Volterra using the best least-squares fit
+    to the label targets on the current feature matrix.
+
+    Returns:
+        R_val: ||x*||^2 where x* solves min ||Ax - b||^2
+        noise_var: mean squared residual ||Ax* - b||^2 / n
+    """
+    with torch.no_grad():
+        solution = torch.linalg.lstsq(A, b.unsqueeze(1)).solution.squeeze(1)
+        residuals = A @ solution - b
+        R_val = torch.sum(solution**2).item()
+        noise_var = torch.mean(residuals**2).item()
+    return R_val, noise_var
 
 
 def analyze_and_scale_spectrum(A: torch.Tensor, r: float, n: int):
@@ -109,7 +127,8 @@ def analyze_and_scale_spectrum(A: torch.Tensor, r: float, n: int):
 
 def run_experiment_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
                          gamma_max: float, r: float, n: int, num_epochs: int,
-                         num_runs: int, sweep_name: str = ""):
+                         num_runs: int, R_val: float, noise_var: float,
+                         sweep_name: str = ""):
     """Run SGD + Volterra comparison for multiple learning rates."""
     steps = n * num_epochs
     multipliers = [0.25, 0.5, 0.9]
@@ -123,9 +142,8 @@ def run_experiment_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
         key = f"{mult:.2f}"
         print(f"  gamma = {gamma:.4f} ({mult*100:.0f}% of gamma_max)...")
 
-        # Volterra Theory
-        R_val = 1.0
-        solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=0.0)
+        # Volterra Theory driven by label-induced R and residual variance
+        solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=noise_var)
         psi, t_theory = solver.solve(t_max=num_epochs, dt=0.05)
 
         # Empirical SGD
@@ -356,10 +374,13 @@ def main():
 
     # Load MNIST
     print("\nLoading MNIST...")
-    X_mnist, _ = load_mnist(root='./data', train=True, flatten=True,
+    X_mnist, y_mnist = load_mnist(root='./data', train=True, flatten=True,
                             subset_size=N_SAMPLES, download=True)
     X_mnist = X_mnist.to(device)
+    y_mnist = y_mnist.to(device)
+    b_labels = prepare_label_targets(y_mnist, device)
     print(f"X_mnist shape: {X_mnist.shape}")
+    print(f"Labels shape: {y_mnist.shape} (mean-centered)")
 
     # Main experiment loop
     print("\n" + "="*60)
@@ -377,24 +398,25 @@ def main():
         print(f"{'='*60}")
 
         A, W = build_random_features(X_mnist, r, device)
-        x_star, b, x0, initial_loss = generate_planted_targets(A, device)
         A_scaled, eigvals, gamma_max_theory, gamma_max_safe, spectral_info = \
             analyze_and_scale_spectrum(A, r, N_SAMPLES)
 
         all_eigvals[r] = eigvals
 
-        b_scaled = A_scaled @ x_star
-        initial_loss_scaled = (1.0 / (2 * N_SAMPLES)) * torch.sum(b_scaled**2).item()
+        initial_loss = (1.0 / (2 * N_SAMPLES)) * torch.sum(b_labels**2).item()
+        R_val, noise_var = estimate_target_stats(A_scaled, b_labels)
 
         results_safe = run_experiment_sweep(
-            A_scaled, b_scaled, eigvals,
+            A_scaled, b_labels, eigvals,
             gamma_max_safe, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
+            R_val, noise_var,
             sweep_name="Safe"
         )
 
         results_theory = run_experiment_sweep(
-            A_scaled, b_scaled, eigvals,
+            A_scaled, b_labels, eigvals,
             gamma_max_theory, r, N_SAMPLES, NUM_EPOCHS, NUM_RUNS,
+            R_val, noise_var,
             sweep_name="Theory"
         )
 
@@ -402,7 +424,9 @@ def main():
             'spectral_info': spectral_info,
             'gamma_max_theory': gamma_max_theory,
             'gamma_max_safe': gamma_max_safe,
-            'initial_loss': initial_loss_scaled,
+            'initial_loss': initial_loss,
+            'label_R': R_val,
+            'label_noise': noise_var,
             'eigvals': eigvals,
             'results_safe': results_safe,
             'results_theory': results_theory
