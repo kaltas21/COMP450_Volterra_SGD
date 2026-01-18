@@ -81,25 +81,54 @@ def prepare_label_targets(y: torch.Tensor, device: torch.device) -> torch.Tensor
     return b - b.mean()
 
 
-def estimate_target_stats(A: torch.Tensor, b: torch.Tensor, reg: float = 1e-4) -> tuple:
-    """
-    Estimate R and noise variance for Volterra using ridge regression.
-    Uses regularized least-squares to avoid ill-conditioning when A is square.
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
+    """Estimate R and noise variance for Volterra using truncated SVD.
+
+    Uses SVD with adaptive regularization based on condition number.
+    This properly handles ill-conditioned matrices (r ≈ 1.0) where
+    standard least-squares fails.
     """
     with torch.no_grad():
         n, d = A.shape
-        AtA = A.T @ A
-        Atb = A.T @ b
-        AtA_reg = AtA + reg * torch.eye(d, device=A.device, dtype=A.dtype)
-        solution = torch.linalg.solve(AtA_reg, Atb)
+
+        # Use SVD for stable computation
+        U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+
+        # Condition number and adaptive threshold
+        max_sv = S[0].item()
+        min_sv = S[-1].item()
+        condition_number = max_sv / (min_sv + 1e-10)
+
+        # Adaptive regularization: stronger for ill-conditioned matrices
+        if condition_number > 1000:
+            threshold = max_sv * 0.01
+        elif condition_number > 100:
+            threshold = max_sv * 0.001
+        else:
+            threshold = max_sv * 1e-6
+
+        # Truncated pseudo-inverse: zero out small singular values
+        S_inv = torch.zeros_like(S)
+        mask = S > threshold
+        S_inv[mask] = 1.0 / S[mask]
+
+        # Compute minimum-norm solution: x = V @ S_inv @ U^T @ b
+        Utb = U.T @ b
+        solution = Vh.T @ (S_inv * Utb)
 
         residuals = A @ solution - b
         R_val = torch.sum(solution**2).item()
         noise_var = torch.mean(residuals**2).item()
 
-        if R_val > 1e6:
-            print(f"  Warning: R_val={R_val:.2e} is very large, clamping to 100")
-            R_val = 100.0
+        # Additional sanity check based on data scale
+        b_var = torch.var(b).item()
+        max_reasonable_R = 100 * b_var
+
+        if R_val > max_reasonable_R:
+            print(f"  Warning: R_val={R_val:.2e} exceeds {max_reasonable_R:.2e}, clamping")
+            R_val = max_reasonable_R
+
+        print(f"    Condition number: {condition_number:.1f}, threshold: {threshold:.2e}, R: {R_val:.4f}, noise: {noise_var:.6f}")
 
     return R_val, noise_var
 
