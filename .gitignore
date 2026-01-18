@@ -33,9 +33,6 @@ env/
 data/*
 !data/MNIST/
 
-# Results (generated outputs)
-results/
-
 # PDF documents
 docs/*.pdf
 
