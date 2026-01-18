@@ -400,74 +400,151 @@ def plot_correlation_scatter(all_results: dict, n_samples: int, output_dir: str,
     return correlations
 
 
-def compute_error_metrics(all_results: dict, n_samples: int) -> tuple:
+def compute_error_metrics(all_results: dict, n_samples: int) -> dict:
     """
-    Compute per-aspect-ratio MSE and relative error between Volterra and SGD.
+    Compute comprehensive error metrics between Volterra and SGD.
+
+    Returns dict with:
+        - pearson_r: Pearson correlation (shape similarity)
+        - r2_yx: R² relative to y=x line (prediction accuracy)
+        - mape: Mean Absolute Percentage Error
+        - rmse: Root Mean Square Error
+        - mean_ratio: Mean(Volterra/SGD), should be ~1.0
     """
-    mse_by_r = []
-    rel_by_r = []
+    metrics = {key: [] for key in ['pearson_r', 'r2_yx', 'mape', 'rmse', 'mean_ratio']}
 
     for r in ASPECT_RATIOS:
         res = all_results[r]
-        mse_vals = []
-        rel_vals = []
+        all_volt, all_sgd = [], []
 
         for data in res['results_safe'].values():
             loss_every = data.get('loss_every', 1)
             t_sgd = np.arange(len(data['sgd_mean'])) * loss_every / n_samples
-            volterra_interp = np.interp(t_sgd, data['t_theory'], data['psi'])
-            sgd = np.asarray(data['sgd_mean'])
+            volt_interp = np.interp(t_sgd, data['t_theory'], data['psi'])
+            all_volt.extend(volt_interp)
+            all_sgd.extend(data['sgd_mean'])
 
-            valid = np.isfinite(volterra_interp) & np.isfinite(sgd)
-            volterra_interp = volterra_interp[valid]
-            sgd = sgd[valid]
-            if sgd.size == 0:
-                continue
+        volt = np.array(all_volt)
+        sgd = np.array(all_sgd)
+        valid = np.isfinite(volt) & np.isfinite(sgd) & (sgd > 0)
+        volt, sgd = volt[valid], sgd[valid]
 
-            mse_vals.append(np.mean((volterra_interp - sgd) ** 2))
-            denom = np.mean(np.abs(sgd))
-            rel_vals.append(np.mean(np.abs(volterra_interp - sgd)) / (denom + 1e-12))
+        if len(sgd) == 0:
+            for key in metrics:
+                metrics[key].append(float('nan'))
+            continue
 
-        mse_by_r.append(np.mean(mse_vals) if mse_vals else float('nan'))
-        rel_by_r.append(np.mean(rel_vals) if rel_vals else float('nan'))
+        # Pearson correlation (linear relationship)
+        pearson_r, _ = stats.pearsonr(volt, sgd)
 
-    return np.array(mse_by_r), np.array(rel_by_r)
+        # R² relative to y=x line (not regression line!)
+        ss_res = np.sum((sgd - volt) ** 2)
+        ss_tot = np.sum((sgd - np.mean(sgd)) ** 2)
+        r2_yx = 1 - ss_res / ss_tot  # Can be negative if predictions worse than mean
+
+        # MAPE
+        mape = np.mean(np.abs(volt - sgd) / sgd) * 100
+
+        # RMSE
+        rmse = np.sqrt(np.mean((volt - sgd) ** 2))
+
+        # Mean ratio
+        mean_ratio = np.mean(volt / sgd)
+
+        metrics['pearson_r'].append(pearson_r)
+        metrics['r2_yx'].append(r2_yx)
+        metrics['mape'].append(mape)
+        metrics['rmse'].append(rmse)
+        metrics['mean_ratio'].append(mean_ratio)
+
+    return {k: np.array(v) for k, v in metrics.items()}
 
 
 def plot_error_metrics(all_results: dict, n_samples: int, output_dir: str,
                        title_prefix: str = ""):
-    """Generate MSE and relative error plots."""
-    mse_by_r, rel_by_r = compute_error_metrics(all_results, n_samples)
+    """Generate comprehensive error metrics plots."""
+    metrics = compute_error_metrics(all_results, n_samples)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     colors_r = [COLORS['lr1'], COLORS['lr2'], COLORS['lr3']]
     x = np.arange(len(ASPECT_RATIOS))
 
-    ax = axes[0]
-    ax.bar(x, mse_by_r, color=colors_r, edgecolor='black', lw=0.8)
+    # Plot 1: Pearson R (correlation - shape similarity)
+    ax = axes[0, 0]
+    bars = ax.bar(x, metrics['pearson_r'], color=colors_r, edgecolor='black', lw=0.8)
     ax.set_xlabel('Aspect Ratio r')
-    ax.set_ylabel('MSE (log scale)')
-    ax.set_title('MSE')
+    ax.set_ylabel('Pearson R')
+    ax.set_title('Pearson Correlation (Shape Similarity)')
     ax.set_xticks(x)
     ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
-    ax.set_yscale('log')
+    ax.set_ylim(0, 1.05)
+    ax.axhline(y=1.0, color='green', linestyle='--', alpha=0.5, label='Perfect')
+    for bar, val in zip(bars, metrics['pearson_r']):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{val:.3f}', ha='center', va='bottom', fontsize=9)
     ax.grid(True, alpha=0.3, axis='y')
 
-    ax = axes[1]
-    ax.bar(x, rel_by_r, color=colors_r, edgecolor='black', lw=0.8)
+    # Plot 2: R² vs y=x (prediction accuracy - can be negative!)
+    ax = axes[0, 1]
+    r2_vals = metrics['r2_yx']
+    colors_r2 = ['green' if v > 0.5 else 'orange' if v > 0 else 'red' for v in r2_vals]
+    bars = ax.bar(x, r2_vals, color=colors_r2, edgecolor='black', lw=0.8)
     ax.set_xlabel('Aspect Ratio r')
-    ax.set_ylabel('Relative Error')
-    ax.set_title('Relative Error')
+    ax.set_ylabel('R² (vs y=x)')
+    ax.set_title('R² vs y=x Line (Prediction Accuracy)')
     ax.set_xticks(x)
     ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
-    ax.set_ylim(bottom=0)
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax.axhline(y=1.0, color='green', linestyle='--', alpha=0.5, label='Perfect')
+    for bar, val in zip(bars, r2_vals):
+        y_pos = bar.get_height() + 0.05 if val >= 0 else bar.get_height() - 0.15
+        ax.text(bar.get_x() + bar.get_width()/2, y_pos,
+                f'{val:.2f}', ha='center', va='bottom', fontsize=9)
     ax.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle(f'{title_prefix} Error Metrics', fontsize=14, fontweight='bold')
+    # Plot 3: MAPE (Mean Absolute Percentage Error)
+    ax = axes[1, 0]
+    mape_vals = metrics['mape']
+    colors_mape = ['green' if v < 20 else 'orange' if v < 50 else 'red' for v in mape_vals]
+    bars = ax.bar(x, mape_vals, color=colors_mape, edgecolor='black', lw=0.8)
+    ax.set_xlabel('Aspect Ratio r')
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('Mean Absolute Percentage Error')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
+    ax.axhline(y=20, color='green', linestyle='--', alpha=0.5, label='Good (<20%)')
+    for bar, val in zip(bars, mape_vals):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{val:.1f}%', ha='center', va='bottom', fontsize=9)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Plot 4: Mean Ratio (should be ~1.0)
+    ax = axes[1, 1]
+    ratio_vals = metrics['mean_ratio']
+    colors_ratio = ['green' if 0.8 < v < 1.2 else 'orange' if 0.5 < v < 2.0 else 'red' for v in ratio_vals]
+    bars = ax.bar(x, ratio_vals, color=colors_ratio, edgecolor='black', lw=0.8)
+    ax.set_xlabel('Aspect Ratio r')
+    ax.set_ylabel('Mean Ratio (Volt/SGD)')
+    ax.set_title('Mean Prediction Ratio (ideal = 1.0)')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'r={r}' for r in ASPECT_RATIOS])
+    ax.axhline(y=1.0, color='green', linestyle='--', lw=2, label='Perfect (1.0)')
+    for bar, val in zip(bars, ratio_vals):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05,
+                f'{val:.2f}', ha='center', va='bottom', fontsize=9)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle(f'{title_prefix} Prediction Quality Metrics', fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'error_metrics.png'), dpi=300)
     plt.savefig(os.path.join(output_dir, 'error_metrics.pdf'))
     plt.close()
+
+    # Print metrics summary
+    print(f"  Metrics summary:")
+    for i, r in enumerate(ASPECT_RATIOS):
+        print(f"    r={r}: Pearson={metrics['pearson_r'][i]:.3f}, R²={metrics['r2_yx'][i]:.3f}, "
+              f"MAPE={metrics['mape'][i]:.1f}%, Ratio={metrics['mean_ratio'][i]:.2f}")
 
 
 def plot_eigenvalue_spectrum(all_eigvals: dict, output_dir: str, title_prefix: str = ""):
