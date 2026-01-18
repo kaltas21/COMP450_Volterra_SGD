@@ -139,16 +139,23 @@ def prepare_nonlinear_targets(y: torch.Tensor, device: torch.device):
 
 
 def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
-    """Estimate R and noise variance for Volterra using truncated SVD.
+    """Estimate R and noise variance for Volterra, calibrated to match SGD initial loss.
 
-    Uses SVD with adaptive regularization based on condition number.
-    This properly handles ill-conditioned matrices (r ≈ 1.0) where
-    standard least-squares fails.
+    The Volterra theory predicts: psi(0) = (R + R_tilde) / 2
+    The actual SGD initial loss is: L(0) = (1/2n) ||b||^2
+
+    For consistency, we calibrate R so that psi(0) = L(0):
+        R = 2 * L(0) - R_tilde
+
+    This ensures Volterra and SGD start at the same loss value.
     """
     with torch.no_grad():
         n, d = A.shape
 
-        # Use SVD for stable computation
+        # Compute actual SGD initial loss (since x_0 = 0)
+        initial_loss = (1.0 / (2.0 * n)) * torch.sum(b**2).item()
+
+        # Use SVD to estimate noise variance (residual after best fit)
         U, S, Vh = torch.linalg.svd(A, full_matrices=False)
 
         # Condition number and adaptive threshold
@@ -156,40 +163,40 @@ def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
         min_sv = S[-1].item()
         condition_number = max_sv / (min_sv + 1e-10)
 
-        # Adaptive regularization: stronger for ill-conditioned matrices
-        # threshold = max_sv * max(1e-3, 1e-2 * sqrt(condition_number / 1000))
+        # Adaptive regularization based on condition number
         if condition_number > 1000:
-            # Ill-conditioned: use aggressive truncation
             threshold = max_sv * 0.01
         elif condition_number > 100:
-            # Moderately ill-conditioned
             threshold = max_sv * 0.001
         else:
-            # Well-conditioned
             threshold = max_sv * 1e-6
 
-        # Truncated pseudo-inverse: zero out small singular values
+        # Truncated pseudo-inverse
         S_inv = torch.zeros_like(S)
         mask = S > threshold
         S_inv[mask] = 1.0 / S[mask]
 
-        # Compute minimum-norm solution: x = V @ S_inv @ U^T @ b
+        # Compute minimum-norm solution
         Utb = U.T @ b
         solution = Vh.T @ (S_inv * Utb)
 
+        # Noise variance = mean squared residual
         residuals = A @ solution - b
-        R_val = torch.sum(solution**2).item()
         noise_var = torch.mean(residuals**2).item()
 
-        # Additional sanity check based on data scale
-        b_var = torch.var(b).item()
-        max_reasonable_R = 100 * b_var  # R shouldn't be more than 100x target variance
+        # Calibrate R so that Volterra's psi(0) = SGD's initial loss
+        # psi(0) = (R + noise_var) / 2 = initial_loss
+        # => R = 2 * initial_loss - noise_var
+        R_val = 2.0 * initial_loss - noise_var
 
-        if R_val > max_reasonable_R:
-            print(f"  Warning: R_val={R_val:.2e} exceeds {max_reasonable_R:.2e}, clamping")
-            R_val = max_reasonable_R
+        # R must be non-negative
+        if R_val < 0:
+            print(f"  Warning: Calibrated R={R_val:.4f} < 0, setting to 0")
+            R_val = 0.0
 
-        print(f"    Condition number: {condition_number:.1f}, threshold: {threshold:.2e}, R: {R_val:.4f}, noise: {noise_var:.6f}")
+        print(f"    Condition number: {condition_number:.1f}, initial_loss: {initial_loss:.4f}")
+        print(f"    Calibrated R: {R_val:.4f}, noise_var: {noise_var:.6f}")
+        print(f"    Volterra psi(0) will be: {(R_val + noise_var)/2:.4f}")
 
     return R_val, noise_var
 
