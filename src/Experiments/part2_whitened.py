@@ -81,16 +81,26 @@ def prepare_label_targets(y: torch.Tensor, device: torch.device) -> torch.Tensor
     return b - b.mean()
 
 
-def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor, reg: float = 1e-4) -> tuple:
     """
-    Estimate R and noise variance for Volterra using the best least-squares fit
-    to the label targets on the current feature matrix.
+    Estimate R and noise variance for Volterra using ridge regression.
+    Uses regularized least-squares to avoid ill-conditioning when A is square.
     """
     with torch.no_grad():
-        solution = torch.linalg.lstsq(A, b.unsqueeze(1)).solution.squeeze(1)
+        n, d = A.shape
+        AtA = A.T @ A
+        Atb = A.T @ b
+        AtA_reg = AtA + reg * torch.eye(d, device=A.device, dtype=A.dtype)
+        solution = torch.linalg.solve(AtA_reg, Atb)
+
         residuals = A @ solution - b
         R_val = torch.sum(solution**2).item()
         noise_var = torch.mean(residuals**2).item()
+
+        if R_val > 1e6:
+            print(f"  Warning: R_val={R_val:.2e} is very large, clamping to 100")
+            R_val = 100.0
+
     return R_val, noise_var
 
 

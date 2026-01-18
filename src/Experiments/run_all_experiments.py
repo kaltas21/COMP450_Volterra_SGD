@@ -138,13 +138,29 @@ def prepare_nonlinear_targets(y: torch.Tensor, device: torch.device):
     return b, zero_fraction
 
 
-def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
-    """Estimate R and noise variance for Volterra."""
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor, reg: float = 1e-4) -> tuple:
+    """Estimate R and noise variance for Volterra using ridge regression.
+
+    Uses regularized least-squares to avoid ill-conditioning when A is square.
+    """
     with torch.no_grad():
-        solution = torch.linalg.lstsq(A, b.unsqueeze(1)).solution.squeeze(1)
+        n, d = A.shape
+        # Ridge regression: (A^T A + reg*I)^{-1} A^T b
+        AtA = A.T @ A
+        Atb = A.T @ b
+        # Add regularization to diagonal
+        AtA_reg = AtA + reg * torch.eye(d, device=A.device, dtype=A.dtype)
+        solution = torch.linalg.solve(AtA_reg, Atb)
+
         residuals = A @ solution - b
         R_val = torch.sum(solution**2).item()
         noise_var = torch.mean(residuals**2).item()
+
+        # Sanity check: R should be reasonable (not billions)
+        if R_val > 1e6:
+            print(f"  Warning: R_val={R_val:.2e} is very large, clamping to 100")
+            R_val = 100.0
+
     return R_val, noise_var
 
 
