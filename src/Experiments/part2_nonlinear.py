@@ -87,51 +87,34 @@ def prepare_nonlinear_label_targets(y: torch.Tensor, device: torch.device):
     return b, zero_fraction
 
 
-def estimate_target_stats(A: torch.Tensor, b: torch.Tensor) -> tuple:
+def estimate_target_stats(A: torch.Tensor, b: torch.Tensor, r: float, eigvals: np.ndarray) -> tuple:
     """Estimate R and noise variance for Volterra, calibrated to match SGD initial loss.
 
-    The Volterra theory predicts: psi(0) = (R + R_tilde) / 2
-    The actual SGD initial loss is: L(0) = (1/2n) ||b||^2
-
-    For consistency, we calibrate R so that psi(0) = L(0):
-        R = 2 * L(0) - R_tilde
+    psi(0) = (R/2)*h1(0) + R_tilde/2, where h1(0) = 1 for r<=1, or 1/r for r>1.
+    Calibrate R so psi(0) = L(0) = (1/2n)||b||^2.
     """
     with torch.no_grad():
         n, d = A.shape
-
-        # Compute actual SGD initial loss (since x_0 = 0)
         initial_loss = (1.0 / (2.0 * n)) * torch.sum(b**2).item()
 
-        # Use SVD to estimate noise variance
-        U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+        h1_0 = np.mean(eigvals) if r <= 1.0 else 1.0 / r
 
-        max_sv = S[0].item()
-        min_sv = S[-1].item()
+        U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+        max_sv, min_sv = S[0].item(), S[-1].item()
         condition_number = max_sv / (min_sv + 1e-10)
 
-        if condition_number > 1000:
-            threshold = max_sv * 0.01
-        elif condition_number > 100:
-            threshold = max_sv * 0.001
-        else:
-            threshold = max_sv * 1e-6
+        threshold = max_sv * (0.01 if condition_number > 1000 else 0.001 if condition_number > 100 else 1e-6)
+        S_inv = torch.where(S > threshold, 1.0 / S, torch.zeros_like(S))
 
-        S_inv = torch.zeros_like(S)
-        mask = S > threshold
-        S_inv[mask] = 1.0 / S[mask]
+        solution = Vh.T @ (S_inv * (U.T @ b))
+        noise_var = torch.mean((A @ solution - b)**2).item()
 
-        Utb = U.T @ b
-        solution = Vh.T @ (S_inv * Utb)
-
-        residuals = A @ solution - b
-        noise_var = torch.mean(residuals**2).item()
-
-        # Calibrate R so Volterra psi(0) = SGD initial loss
-        R_val = 2.0 * initial_loss - noise_var
+        R_val = (2.0 / h1_0) * (initial_loss - noise_var / 2.0)
         if R_val < 0:
             R_val = 0.0
 
-        print(f"    Calibrated R: {R_val:.4f}, noise_var: {noise_var:.6f}, psi(0): {(R_val + noise_var)/2:.4f}")
+        psi_0 = (R_val / 2.0) * h1_0 + noise_var / 2.0
+        print(f"    h1(0)={h1_0:.4f}, R={R_val:.4f}, noise={noise_var:.6f}, psi(0)={psi_0:.4f}")
 
     return R_val, noise_var
 
@@ -417,8 +400,7 @@ def main():
 
         all_eigvals[r] = eigvals
 
-        initial_loss = (1.0 / (2 * N_SAMPLES)) * torch.sum(b_labels**2).item()
-        R_val, noise_var = estimate_target_stats(A_scaled, b_labels)
+        R_val, noise_var = estimate_target_stats(A_scaled, b_labels, r, eigvals)
 
         results_safe = run_experiment_sweep(
             A_scaled, b_labels, eigvals,
