@@ -17,30 +17,34 @@ class LeastSquaresSGD:
         self.batch_size = batch_size
         self.n, self.d = A.shape
         self.x = torch.zeros(self.d, dtype=A.dtype, device=A.device)
-        
-    def train(self, steps: int) -> np.ndarray:
+
+    def train(self, steps: int, show_progress: bool = False, desc: str = "SGD") -> np.ndarray:
         losses = []
         n_factor = 1.0 / (2.0 * self.n)
-        
+
         # Precompute XT X if small enough for faster loss calc, else do batch
         # For exact paper reproduction, we calculate full loss at each step
-        
-        for _ in range(steps):
+
+        iterator = range(steps)
+        if show_progress:
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+
+        for _ in iterator:
             # 1. Full Loss (Expensive but required for trajectory plotting)
             # f(x) = 1/(2n) ||Ax - b||^2
             with torch.no_grad():
                 residuals = self.A @ self.x - self.b
                 loss = n_factor * torch.sum(residuals**2)
                 losses.append(loss.item())
-            
+
             # 2. Update
             indices = torch.randint(0, self.n, (self.batch_size,), device=self.A.device)
             a_batch = self.A[indices]
             b_batch = self.b[indices]
-            
+
             grad = a_batch.T @ (a_batch @ self.x - b_batch) / self.batch_size
             self.x -= self.lr * grad
-            
+
         return np.array(losses)
 
 class StreamingSGD:
@@ -57,7 +61,8 @@ class StreamingSGD:
         # Defer x creation until we know the device
         self.x = None
 
-    def train(self, steps: int, test_A: torch.Tensor, test_b: torch.Tensor) -> np.ndarray:
+    def train(self, steps: int, test_A: torch.Tensor, test_b: torch.Tensor,
+              show_progress: bool = False, desc: str = "Streaming") -> np.ndarray:
         losses = []
         n_test = test_A.shape[0]
         n_factor = 1.0 / (2.0 * n_test)
@@ -66,14 +71,18 @@ class StreamingSGD:
         if self.x is None or self.x.device != test_A.device:
             self.x = torch.zeros(self.d, dtype=test_A.dtype, device=test_A.device)
 
-        for _ in range(steps):
+        iterator = range(steps)
+        if show_progress:
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+
+        for _ in iterator:
             # Measure performance on a fixed "test set" (the finite dataset A)
             # to make it comparable to the Volterra prediction for that specific A.
             with torch.no_grad():
                 residuals = test_A @ self.x - test_b
                 loss = n_factor * torch.sum(residuals**2)
             losses.append(loss.item())
-            
+
             # Generate fresh data for update
             a_stream, b_stream = self.gen_func(self.batch_size)
 
@@ -111,7 +120,7 @@ class MultiOutputLeastSquaresSGD:
         self.k = B.shape[1]
         self.X = torch.zeros(self.d, self.k, dtype=A.dtype, device=A.device)
 
-    def train(self, steps: int) -> np.ndarray:
+    def train(self, steps: int, show_progress: bool = False, desc: str = "MultiSGD") -> np.ndarray:
         """
         Run SGD for specified number of steps.
 
@@ -121,7 +130,11 @@ class MultiOutputLeastSquaresSGD:
         losses = []
         n_factor = 1.0 / (2.0 * self.n)
 
-        for _ in range(steps):
+        iterator = range(steps)
+        if show_progress:
+            iterator = tqdm(iterator, desc=desc, leave=False, miniters=steps//100 or 1)
+
+        for _ in iterator:
             # Full loss: (1/2n) * ||AX - B||_F^2
             with torch.no_grad():
                 residuals = self.A @ self.X - self.B

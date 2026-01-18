@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
 from src.data_loader import load_mnist
 from src.random_features import generate_random_weights, compute_features
 from src.spectral import compute_eigenvalues
@@ -126,9 +127,9 @@ def run_criticality_experiment(X: torch.Tensor, y: torch.Tensor, r: float, n: in
 
         steps = n * num_epochs
 
-        for run in range(num_runs):
+        for run in tqdm(range(num_runs), desc=f"    Runs (mult={mult:.3f})", leave=False):
             model = LeastSquaresSGD(A_scaled, b, learning_rate=lr, batch_size=1)
-            loss_hist = model.train(steps)
+            loss_hist = model.train(steps, show_progress=True, desc=f"      SGD Run {run+1}")
 
             stable = is_stable(loss_hist, initial_loss)
             final_loss = loss_hist[-1] if np.isfinite(loss_hist[-1]) else float('inf')
@@ -137,7 +138,7 @@ def run_criticality_experiment(X: torch.Tensor, y: torch.Tensor, r: float, n: in
             final_losses.append(final_loss)
 
             status_str = "Stable" if stable else "DIVERGED"
-            print(f"    Run {run+1}: {status_str} (Loss: {final_loss:.6f})")
+            tqdm.write(f"    Run {run+1}: {status_str} (Loss: {final_loss:.6f})")
 
         # Aggregate results for this gamma
         num_stable = sum(run_statuses)

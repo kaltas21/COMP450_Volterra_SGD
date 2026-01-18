@@ -29,6 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import stats
 
+from tqdm import tqdm
 from src.data_loader import load_mnist, whiten_data
 from src.random_features import generate_random_weights, compute_features
 from src.spectral import compute_eigenvalues, marchenko_pastur_density
@@ -147,11 +148,11 @@ def run_experiment_sweep(A: torch.Tensor, b: torch.Tensor, eigvals: np.ndarray,
         solver = VolterraSolver(eigvals, gamma, r, R=R_val, R_tilde=noise_var)
         psi, t_theory = solver.solve(t_max=num_epochs, dt=0.05)
 
-        # Empirical SGD
+        # Empirical SGD with progress bar
         sgd_runs = []
-        for run in range(num_runs):
+        for run in tqdm(range(num_runs), desc=f"    Runs (gamma={mult:.0%})", leave=False):
             model = LeastSquaresSGD(A, b, learning_rate=gamma/n, batch_size=1)
-            loss_hist = model.train(steps)
+            loss_hist = model.train(steps, show_progress=True, desc=f"      SGD Run {run+1}")
             sgd_runs.append(loss_hist)
 
         sgd_mean = np.mean(sgd_runs, axis=0)

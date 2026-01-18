@@ -22,6 +22,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
 from src.sgd import LeastSquaresSGD, StreamingSGD
 from src.volterra import VolterraSolver
 from src.spectral import compute_eigenvalues
@@ -160,11 +161,11 @@ def run_experiment(data_mode: str, device: torch.device) -> dict:
         solver = VolterraSolver(eigvals, gamma, ASPECT_RATIO, R=R_val, R_tilde=0.0)
         psi, t_theory = solver.solve(t_max=NUM_EPOCHS, dt=0.05)
 
-        # Empirical SGD
+        # Empirical SGD with progress bar
         sgd_runs = []
-        for _ in range(NUM_RUNS):
+        for run_idx in tqdm(range(NUM_RUNS), desc=f"    SGD Runs ({mult:.3f}x)", leave=False):
             model = LeastSquaresSGD(A, b, learning_rate=gamma/N_SAMPLES, batch_size=1)
-            loss_hist = model.train(STEPS)
+            loss_hist = model.train(STEPS, show_progress=True, desc=f"      Run {run_idx+1}")
             sgd_runs.append(loss_hist)
         sgd_mean = np.mean(sgd_runs, axis=0)
         sgd_std = np.std(sgd_runs, axis=0)
@@ -181,7 +182,7 @@ def run_experiment(data_mode: str, device: torch.device) -> dict:
             return A_s, b_s
 
         streamer = StreamingSGD(D_FEATURES, gamma/N_SAMPLES, stream_gen)
-        streaming_loss = streamer.train(STEPS, A, b)
+        streaming_loss = streamer.train(STEPS, A, b, show_progress=True, desc=f"    Streaming ({mult:.3f}x)")
 
         # SME & SDE
         sme_loss = run_sme_simulation(A, b, x0, gamma, STEPS)
